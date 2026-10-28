@@ -36,3 +36,5 @@ if [[ -n "${offending}" ]]; then
   exit 1
 fi
 echo "All needed jobs passed"
+
+# Dry run of the release workflow
