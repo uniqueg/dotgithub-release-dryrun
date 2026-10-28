@@ -45,7 +45,9 @@ merged. The tags are lightweight tags that the release API creates, not
 signed annotated tags. Tags and releases are never changed or reused: a
 release with a mistake (e.g., a wrong version) is fixed by the next release.
 Don't create `vX.Y.Z` tags or releases by hand: the workflow computes the
-next version from the release tags on `main`.
+next version from the release tags on `main` (pull requests are
+squash-merged, so tags on other branches never become part of `main`), and
+fails if the next version exists as a tag elsewhere.
 
 ## Versions
 

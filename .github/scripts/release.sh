@@ -10,7 +10,8 @@
 #     bump follows the Conventional Commit messages of these commits: `!` or
 #     a `BREAKING CHANGE:` footer gives a major, `feat` a minor, anything else
 #     a patch release. The first release is v1.0.0. Prints nothing if
-#     <commit> is already part of a release.
+#     <commit> is already part of a release on the release branch
+#     (RELEASE_BRANCH, by default `origin/main`); fails if the tag exists.
 #
 #   release.sh notes <tag> <previous release or ""> <commit>
 #     Prints the release notes of <tag> in the organisation's format. Calls
@@ -20,6 +21,8 @@ set -euo pipefail
 
 # The pathspec of the files that callers run: the actions, without docs
 release_paths=(actions ':(exclude,glob)actions/**/*.md')
+# The branch of the releases
+release_branch="${RELEASE_BRANCH:-origin/main}"
 # Release tags
 tag_pattern='^v[0-9]+\.[0-9]+\.[0-9]+$'
 
@@ -35,9 +38,10 @@ last_release() {
     | TAG_PATTERN="${tag_pattern}" awk '$0 ~ ENVIRON["TAG_PATTERN"] && !found { print; found = 1 }'
 }
 
-# Whether a release tag points to <commit> or one of its descendants
+# Whether a release tag on the release branch points to <commit> or one of
+# its descendants (tags elsewhere, e.g. on a work branch, don't count)
 released() {
-  git tag --contains "$1" --list 'v*' \
+  git tag --contains "$1" --merged "${release_branch}" --list 'v*' \
     | TAG_PATTERN="${tag_pattern}" awk '$0 ~ ENVIRON["TAG_PATTERN"] { found = 1 } END { exit !found }'
 }
 
@@ -75,11 +79,13 @@ parse_message() {
 }
 
 plan() {
-  local commit previous level=0 message major minor patch
+  local commit previous level=0 message major minor patch tag
   local type scope description pr breaking
   [[ $# -eq 1 ]] || die "Usage: release.sh plan <commit>"
   commit="$(git rev-parse --verify --quiet "$1^{commit}")" \
     || die "Not a commit: $1"
+  git rev-parse --verify --quiet "${release_branch}^{commit}" > /dev/null \
+    || die "Release branch not found: ${release_branch}"
   # Already released, e.g. a run for an older push that waited while a
   # newer push was released
   if released "${commit}"; then
@@ -99,15 +105,21 @@ plan() {
     -- "${release_paths[@]}")
   ((level > 0)) || return 0
   if [[ -z "${previous}" ]]; then
-    echo "tag=v1.0.0"
+    tag=v1.0.0
   else
     IFS=. read -r major minor patch <<< "${previous#v}"
     case "${level}" in
-      3) echo "tag=v$((major + 1)).0.0" ;;
-      2) echo "tag=v${major}.$((minor + 1)).0" ;;
-      *) echo "tag=v${major}.${minor}.$((patch + 1))" ;;
+      3) tag="v$((major + 1)).0.0" ;;
+      2) tag="v${major}.$((minor + 1)).0" ;;
+      *) tag="v${major}.${minor}.$((patch + 1))" ;;
     esac
   fi
+  # A tag elsewhere (e.g. set by hand on another branch) would make the
+  # release API publish that tag's commit instead of <commit>
+  if git rev-parse --verify --quiet "refs/tags/${tag}" > /dev/null; then
+    die "The tag ${tag} exists but isn't on an ancestor of ${commit}"
+  fi
+  echo "tag=${tag}"
   echo "previous=${previous}"
 }
 

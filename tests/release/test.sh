@@ -13,6 +13,8 @@ trap 'rm -rf "${work}"' EXIT
 export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.org
 export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.org
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+# The scratch repository has no remote
+export RELEASE_BRANCH=main
 
 repo="${work}/repo"
 git init -q -b main "${repo}"
@@ -115,8 +117,19 @@ side="$(commit actions/gate/check.sh "fix: on a side branch (#16)")"
 git tag v9.9.9 "${side}"
 git switch -q main
 expect_plan "${featish}" "tag=v2.0.1 previous=v2.0.0"
-expect_plan "${side}" ""
+# A tag on a work branch doesn't count as a release of its ancestors
+git switch -q -c work "${featish}"
+wip="$(commit actions/gate/check.sh "wip: try something")"
+git tag v0.0.9 "${wip}"
+git switch -q main
+expect_plan "${featish}" "tag=v2.0.1 previous=v2.0.0"
+# The next version exists as a tag elsewhere: fail rather than release the
+# commit of that tag
+git tag v2.0.1 "${side}"
+expect_plan "${featish}" "error"
+git tag -d v2.0.1 > /dev/null
 expect_plan "not-a-commit" "error"
+RELEASE_BRANCH=no-such-branch expect_plan "${featish}" "error"
 
 # Release notes, with a fake `gh` that answers like the GitHub API: PR 12
 # closes issues 11 and 4 (and one in another repository), PR 7 closes issue
