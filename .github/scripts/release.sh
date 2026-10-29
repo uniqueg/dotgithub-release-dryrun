@@ -23,8 +23,8 @@ set -euo pipefail
 release_paths=(actions ':(exclude,glob)actions/**/*.md')
 # The branch of the releases
 release_branch="${RELEASE_BRANCH:-origin/main}"
-# Release tags
-tag_pattern='^v[0-9]+\.[0-9]+\.[0-9]+$'
+# Release tags: SemVer `vX.Y.Z`, without leading zeros
+tag_pattern='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
 
 die() {
   echo "::error title=Release::$*" >&2
@@ -109,9 +109,9 @@ plan() {
   else
     IFS=. read -r major minor patch <<< "${previous#v}"
     case "${level}" in
-      3) tag="v$((major + 1)).0.0" ;;
-      2) tag="v${major}.$((minor + 1)).0" ;;
-      *) tag="v${major}.${minor}.$((patch + 1))" ;;
+      3) tag="v$((10#${major} + 1)).0.0" ;;
+      2) tag="v${major}.$((10#${minor} + 1)).0" ;;
+      *) tag="v${major}.${minor}.$((10#${patch} + 1))" ;;
     esac
   fi
   # A tag elsewhere (e.g. set by hand on another branch) would make the
@@ -124,7 +124,7 @@ plan() {
 }
 
 # The numbers of the issues in this repository that pull request <number>
-# closes, space-separated. Nothing if <number> is no pull request (e.g., an
+# closes (at most 100), space-separated. Nothing if <number> is no pull request (e.g., an
 # issue named in a commit pushed directly); fails on other API errors
 closed_issues() {
   local response
@@ -134,7 +134,7 @@ closed_issues() {
       query($owner: String!, $name: String!, $number: Int!) {
         repository(owner: $owner, name: $name) {
           pullRequest(number: $number) {
-            closingIssuesReferences(first: 20) {
+            closingIssuesReferences(first: 100) {
               nodes { number repository { nameWithOwner } }
             }
           }
@@ -145,6 +145,10 @@ closed_issues() {
         > /dev/null 2>&1 <<< "${response}"; then
       return 0
     fi
+    die "Could not look up the issues closed by #$1: ${response}"
+  fi
+  if ! jq -e '(.errors // []) == [] and .data.repository.pullRequest != null' \
+      > /dev/null 2>&1 <<< "${response}"; then
     die "Could not look up the issues closed by #$1: ${response}"
   fi
   jq -r --arg repo "${GH_REPO}" '
@@ -184,6 +188,7 @@ code_list() {
 
 notes() {
   local tag previous commit range sha message heading generated issues
+  local has_deps=0
   local type scope description pr breaking
   local -A sections=() relevant=()
   local -a deps=() changed=() numbers=()
@@ -207,12 +212,13 @@ notes() {
       read -r -a numbers <<< "${issues}"
       numbers+=("${pr}")
     fi
-    if [[ "${type}" == build && "${scope}" == deps ]]; then
-      deps+=("${numbers[@]}")
-      continue
-    fi
     if ((breaking)) && [[ -n "${relevant[${sha}]:-}" ]]; then
       heading="Breaking changes"
+    elif [[ "${type}" == build && "${scope}" == deps ]]; then
+      # Dependabot's updates share one bullet
+      has_deps=1
+      deps+=("${numbers[@]}")
+      continue
     else
       case "${type}:${scope}" in
         *:security) heading=Security ;;
@@ -230,6 +236,8 @@ notes() {
   done < <(git rev-list --reverse "${range}")
   if ((${#deps[@]} > 0)); then
     sections[Maintenance]+="- Dependency updates ($(refs "${deps[@]}"))."$'\n'
+  elif ((has_deps)); then
+    sections[Maintenance]+="- Dependency updates."$'\n'
   fi
 
   # Intro: the actions whose files (other than docs) changed, and whether

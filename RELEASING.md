@@ -37,13 +37,17 @@ workflow (`.github/workflows/release.yml`) runs
 A run that finds no changes to release, or a commit that is already part of
 a release, ends without creating anything. If the release step fails (e.g.,
 because of a tag ruleset), nothing is created; rerun the failed workflow run
-once the cause is fixed, or let the next push to `main` release the changes.
+once the cause is fixed, or leave it to the next push to `main` or to the
+weekly run of the workflow (Mondays), which releases the latest commit of
+`main` that passed CI.
 
-Every merged change to an action is released on its own, so milestones are
-not used here: a change must be complete and safe for callers when it is
-merged. The tags are lightweight tags that the release API creates, not
-signed annotated tags. Tags and releases are never changed or reused: a
-release with a mistake (e.g., a wrong version) is fixed by the next release.
+Changes to the actions are released as soon as they are merged; a release
+covers all commits since the last release (several, if several pull requests
+were merged in quick succession). Milestones are therefore not used here: a
+change must be complete and safe for callers when it is merged. The tags are
+lightweight tags that the release API creates, not signed annotated tags.
+Tags and releases are never changed or reused: a release with a mistake
+(e.g., a wrong version) is fixed by the next release.
 Don't create `vX.Y.Z` tags or releases by hand: the workflow computes the
 next version from the release tags on `main` (pull requests are
 squash-merged, so tags on other branches never become part of `main`), and

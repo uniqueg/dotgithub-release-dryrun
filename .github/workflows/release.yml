@@ -4,13 +4,16 @@
 # GitHub release on the pushed commit, if a commit since the last release
 # changed an action (`.github/scripts/release.sh plan`). The release API
 # creates the tag, so nothing is pushed to `main`. Callers' Dependabot then
-# bumps their pins `@<commit> # vX.Y.Z`
+# bumps their pins `@<commit> # vX.Y.Z`. A weekly run releases the latest
+# commit of `main` that passed CI, in case a run was cancelled or failed
 name: Release
 on:
   workflow_run:
     workflows: [CI]
     types: [completed]
     branches: [main]
+  schedule:
+    - cron: "23 5 * * 1"
 
 permissions: {}
 
@@ -18,21 +21,26 @@ jobs:
   publish:
     name: Release actions
     # Only pushes to `main` of this repository (not pull requests or forks'
-    # branches named `main`), and only if CI passed
+    # branches named `main`), and only if CI passed; or the weekly run
     if: >-
-      github.event.workflow_run.conclusion == 'success'
-      && github.event.workflow_run.event == 'push'
-      && github.event.workflow_run.head_branch == 'main'
-      && github.event.workflow_run.head_repository.full_name == github.repository
+      github.event_name == 'schedule'
+      || (github.event.workflow_run.conclusion == 'success'
+        && github.event.workflow_run.event == 'push'
+        && github.event.workflow_run.head_branch == 'main'
+        && github.event.workflow_run.head_repository.full_name == github.repository)
     # One release at a time; a waiting run is replaced by the run for a
-    # newer push, which includes its commits. On the job, not the workflow,
-    # so that skipped runs (e.g. CI of pull requests) replace nothing
+    # newer push, which includes its commits (a replaced run's changes are
+    # released by the next push or the weekly run). On the job, not the
+    # workflow, so that skipped runs (e.g. CI of pull requests) replace
+    # nothing
     concurrency:
       group: release
       cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      # Find the latest commit that passed CI (weekly run)
+      actions: read
       # Create the tag and the release
       contents: write
       # Look up the issues that each pull request closes
@@ -42,14 +50,28 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 0
           fetch-tags: true
           persist-credentials: false
+      - name: Pick the commit
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          sha="${HEAD_SHA}"
+          if [[ -z "${sha}" ]]; then
+            sha="$(gh run list --workflow ci.yml --branch main --event push \
+              --status success --limit 1 --json headSha --jq '.[0].headSha // ""')"
+          fi
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
       - name: Plan the release
         id: plan
+        if: steps.commit.outputs.sha != ''
         env:
-          COMMIT: ${{ github.event.workflow_run.head_sha }}
+          COMMIT: ${{ steps.commit.outputs.sha }}
         run: |
           plan="$(bash .github/scripts/release.sh plan "${COMMIT}")"
           echo "${plan}" >> "${GITHUB_OUTPUT}"
@@ -64,20 +86,31 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.plan.outputs.tag }}
           PREVIOUS: ${{ steps.plan.outputs.previous }}
-          COMMIT: ${{ github.event.workflow_run.head_sha }}
+          COMMIT: ${{ steps.commit.outputs.sha }}
         run: |
           bash .github/scripts/release.sh notes "${TAG}" "${PREVIOUS}" \
             "${COMMIT}" > "${RUNNER_TEMP}/notes.md"
           cat "${RUNNER_TEMP}/notes.md" >> "${GITHUB_STEP_SUMMARY}"
-      # Creates the tag on the commit; fails without creating anything if
-      # the tag exists or a tag ruleset doesn't let GitHub Actions create it
+      # Creates the tag on the commit; fails without creating anything if a
+      # tag ruleset doesn't let GitHub Actions create it. The release API
+      # would use an existing tag as it is, so check that there is none
+      # before, and that the tag points to the commit after
       - name: Create the release
         if: steps.plan.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ steps.plan.outputs.tag }}
-          COMMIT: ${{ github.event.workflow_run.head_sha }}
+          COMMIT: ${{ steps.commit.outputs.sha }}
         run: |
+          if gh api "repos/${GH_REPO}/git/ref/tags/${TAG}" --silent 2> /dev/null; then
+            echo "::error title=Release::The tag ${TAG} exists already"
+            exit 1
+          fi
           gh release create "${TAG}" --target "${COMMIT}" --title "${TAG}" \
             --notes-file "${RUNNER_TEMP}/notes.md"
+          tagged="$(gh api "repos/${GH_REPO}/git/ref/tags/${TAG}" --jq .object.sha)"
+          if [[ "${tagged}" != "${COMMIT}" ]]; then
+            echo "::error title=Release::${TAG} points to ${tagged}, not ${COMMIT}"
+            exit 1
+          fi

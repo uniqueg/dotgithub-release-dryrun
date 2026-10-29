@@ -107,8 +107,9 @@ expect_plan "${footer}" ""
 # Tags other than vX.Y.Z don't count
 git tag v9 "${featish}"
 git tag v10.0.0-rc1 "${featish}"
-# The dots are literal
+# The dots are literal; no leading zeros
 git tag v3x0x0 "${featish}"
+git tag v2.08.0 "${featish}"
 expect_plan "${featish}" "tag=v2.0.1 previous=v2.0.0"
 # Only release tags on ancestors count: a stray tag elsewhere (e.g. on a
 # side branch) neither blocks nor bumps releases of `main`
@@ -147,6 +148,7 @@ if [[ "$1 $2" == "api graphql" ]]; then
       echo '{"data": {"repository": {"pullRequest": null}}, "errors": [{"type": "NOT_FOUND"}]}'
       exit 1 ;;
     *"number=99 "*) echo '{"message": "Bad credentials"}'; exit 1 ;;
+    *"number=98 "*) echo '{"data": null, "errors": [{"type": "RATE_LIMITED"}]}' ;;
     *) pr "" ;;
   esac
 elif [[ "$2" == */releases/generate-notes ]]; then
@@ -169,6 +171,7 @@ render_notes() {
 }
 
 commit actions/gate/action.yml "build(deps): Bump actions/x from 1 to 2 (#17)" > /dev/null
+commit actions/gate/action.yml "build(deps): Bump actions/y from 1 to 2" > /dev/null
 commit actions/gate/check.sh "fix(security): quote job IDs (#18)" > /dev/null
 commit actions/gate/README.md "docs(gate): explain skips (#19)" > /dev/null
 # Breaking, but not for callers: changes no action
@@ -198,21 +201,35 @@ expect_not_in "breaking outside the actions" "reaking" "${notes}"
 expect_in "sections in order" $'## Features\n\n- Add the pr-title action (#9).\n- Change the tests (#10).\n\n## Fixes\n\n- Handle null (#6, #7).\n' "${notes}"
 expect_in "two actions" "with changes to \`gate\` and \`pr-title\`." "${notes}"
 
+# A breaking dependency update of an action is a breaking change; a
+# dependency update without a PR number still gets a bullet
+breaking_deps="$(commit actions/gate/action.yml "build(deps)!: Bump actions/z from 1 to 2 (#21)")"
+notes="$(render_notes v3.0.0 v2.0.0 "${breaking_deps}")" || notes="error"
+expect_in "breaking dependency update" $'## Breaking changes\n\n- Bump actions/z from 1 to 2 (#21).' "${notes}"
+git switch -q -c deps-only "${featish}"
+commit actions/gate/action.yml "build(deps): Bump actions/y from 1 to 2" > /dev/null
+notes="$(render_notes v2.0.1 v2.0.0 HEAD)" || notes="error"
+expect_in "dependency update without PR" $'## Maintenance\n\n- Feature flags (#15).\n- Dependency updates.' "${notes}"
+git switch -q main
+
 # The first release lists all actions
 notes="$(render_notes v1.0.0 "" "${first}")" || notes="error"
 expect_in "first intro" "The first release of the shared actions of ELIXIR Cloud & AAI: \`gate\`. Callers" "${notes}"
 expect_in "first: maintenance" $'## Maintenance\n\n- Set up CI (#2).\n- Add the gate action (#5).' "${notes}"
 expect_not_in "first: no previous tag" "previous_tag_name" "$(cat "${GH_ARGS_LOG}")"
 
-# Failures: an API error of the issue lookup, no GH_REPO
-commit actions/gate/check.sh "fix: something (#99)" > /dev/null
-if errors="$(render_notes v2.0.2 v2.0.0 HEAD 2>&1 > /dev/null)"; then
-  echo "NOT OK: notes should fail on an API error"
-  failures=$((failures + 1))
-else
-  expect_in "notes fail on an API error" \
-    "Could not look up the issues closed by #99" "${errors}"
-fi
+# Failures: API errors of the issue lookup (failed call; errors in a
+# successful response), no GH_REPO
+for number in 99 98; do
+  commit actions/gate/check.sh "fix: something (#${number})" > /dev/null
+  if errors="$(render_notes v3.0.1 HEAD^ HEAD 2>&1 > /dev/null)"; then
+    echo "NOT OK: notes should fail on an API error (#${number})"
+    failures=$((failures + 1))
+  else
+    expect_in "notes fail on an API error (#${number})" \
+      "Could not look up the issues closed by #${number}" "${errors}"
+  fi
+done
 if GH_REPO="" bash "${script}" notes v1.0.0 "" "${first}" > /dev/null 2>&1; then
   echo "NOT OK: notes without GH_REPO should fail"
   failures=$((failures + 1))
